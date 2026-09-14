@@ -148,6 +148,9 @@ The server provides the following MCP tools:
 ### Recipe Management
 - `list_recipes` - List all recipes
 - `get_recipe_detail(recipe_id)` - Get detailed recipe information
+- `create_recipe(name, recipe_data)` - Create a new recipe using Brewfather's recipe JSON schema
+- `update_recipe(recipe_id, recipe_data)` - Update an existing recipe using Brewfather's recipe JSON schema
+- `delete_recipe(recipe_id)` - Permanently delete a recipe
 
 ### Batch Management
 - `list_batches` - List all brewing batches

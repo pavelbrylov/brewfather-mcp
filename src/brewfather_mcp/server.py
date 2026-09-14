@@ -23,7 +23,7 @@ from brewfather_mcp.types.misc import MiscUse, MiscType
 from brewfather_mcp.types.fermentable import FermentableType, FermentableGrainGroup
 from brewfather_mcp.types.base import MashStepType, FermentationStepType
 from brewfather_mcp.formatter import format_recipe_details
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime
 
 
@@ -753,6 +753,60 @@ async def read_recipe_detail(recipe_id: str) -> str:
         raise
 
 
+@mcp.tool(
+    name="create_recipe",
+    description=(
+        "Create a new Brewfather recipe. Provide recipe data using Brewfather's API schema "
+        "with metric units; at minimum include name."
+    ),
+)
+async def create_recipe(name: str, recipe_data: dict[str, Any] | None = None) -> str:
+    """Create a recipe through Brewfather's API."""
+    data = dict(recipe_data or {})
+    data["name"] = name
+
+    try:
+        result = await brewfather_client.create_recipe(data)
+        recipe_id = result.get("id") or result.get("_id")
+        if recipe_id:
+            return f"Recipe '{name}' created successfully. Recipe ID: {recipe_id}"
+        return f"Recipe '{name}' created successfully. Brewfather response: {result}"
+    except Exception:
+        logger.exception(f"Error happened while creating recipe {name}")
+        raise
+
+
+@mcp.tool(
+    name="update_recipe",
+    description=(
+        "Update an existing Brewfather recipe. The supplied top-level fields replace their "
+        "existing values; ingredient arrays replace the complete corresponding arrays."
+    ),
+)
+async def update_recipe(recipe_id: str, recipe_data: dict[str, Any]) -> str:
+    """Update a recipe through Brewfather's API."""
+    try:
+        await brewfather_client.update_recipe(recipe_id, recipe_data)
+        return f"Recipe {recipe_id} updated successfully."
+    except Exception:
+        logger.exception(f"Error happened while updating recipe {recipe_id}")
+        raise
+
+
+@mcp.tool(
+    name="delete_recipe",
+    description="Permanently delete a Brewfather recipe by ID.",
+)
+async def delete_recipe(recipe_id: str) -> str:
+    """Delete a recipe through Brewfather's API."""
+    try:
+        await brewfather_client.delete_recipe(recipe_id)
+        return f"Recipe {recipe_id} deleted successfully."
+    except Exception:
+        logger.exception(f"Error happened while deleting recipe {recipe_id}")
+        raise
+
+
 # Miscellaneous Inventory Endpoints
 @mcp.tool(
     name="list_misc_items",
@@ -787,13 +841,14 @@ Notes: {item.notes or 'N/A'}
 async def read_misc_detail(item_id: str) -> str:
     logger.info(f"received request for miscellaneous item detail: {item_id}")
     try:
-        # Assuming Miscellaneous model in types.py might be simple for list view.
-        # For full details, a MiscellaneousDetail model would be needed.
         item = await brewfather_client.get_misc_detail(item_id)
         formatted_response = f"""ID: {item.id}
 Name: {item.name}
 Type: {item.type or 'N/A'}
-Inventory: {item.inventory} units
+Inventory: {item.inventory} {item.unit or 'units'}
+Concentration: {item.concentration if item.concentration is not None else 'N/A'}
+Amount per litre: {item.amount_per_l if item.amount_per_l is not None else 'N/A'}
+Water adjustment: {item.water_adjustment}
 Notes: {item.notes or 'N/A'}
 """
         # Add more fields if a more detailed model (e.g., MiscellaneousDetail) is implemented
@@ -1029,5 +1084,3 @@ Showing latest {len(recent_readings)} readings:
     except Exception:
         logger.exception("Error getting readings summary")
         raise
-
-

@@ -88,6 +88,8 @@ class FermentableList(RootModel[list[FermentableBase]]):
 
 class RecipeFermentable(FermentableDetail):
     """Fermentable ingredient in a recipe context"""
+    # Custom recipe ingredients may not have an inventory ID.
+    id: str | None = Field(alias="_id", default=None)
     # Recipe-specific required fields
     amount: float
     percentage: float | None = None

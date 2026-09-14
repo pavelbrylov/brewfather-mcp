@@ -76,11 +76,23 @@ Fermentables:
 ------------
 """
     for ferm in recipe.fermentables:
-        formatted_response += f"{ferm.name}: {ferm.amount}kg ({ferm.percentage or 'N/A'}%) - {ferm.type}\n"
+        inventory_id = ferm.id or "custom"
+        supplier = f", {ferm.supplier}" if ferm.supplier else ""
+        color = f", {ferm.color} EBC" if ferm.color is not None else ""
+        formatted_response += (
+            f"{ferm.name}: {ferm.amount}kg ({ferm.percentage or 'N/A'}%) - "
+            f"{ferm.type} [Inventory ID: {inventory_id}{supplier}{color}]\n"
+        )
 
     formatted_response += "\nHops Schedule:\n-------------\n"
     for hop in recipe.hops:
-        formatted_response += f"{hop.name}: {hop.amount}g ({hop.alpha}% AA) - {hop.use} for {hop.time or 'N/A'} min @ {hop.temp or 100}°C\n"
+        time_unit = hop.time_unit.value if hasattr(hop.time_unit, "value") else hop.time_unit
+        time_unit = time_unit or "min"
+        temperature = f" @ {hop.temp}°C" if hop.temp is not None else ""
+        formatted_response += (
+            f"{hop.name}: {hop.amount}g ({hop.alpha}% AA) - {hop.use} for "
+            f"{hop.time or 'N/A'} {time_unit}{temperature}\n"
+        )
 
     formatted_response += "\nYeast:\n------\n"
     for yeast in recipe.yeasts:
@@ -90,7 +102,12 @@ Fermentables:
     if recipe.miscs:
         formatted_response += "\nMiscellaneous:\n-------------\n"
         for misc in recipe.miscs:
-            formatted_response += f"{misc.name}: {misc.amount} {misc.unit or 'g'} - {misc.use}"
+            inventory_id = misc.id or "custom"
+            concentration = f", concentration {misc.concentration}%" if misc.concentration is not None else ""
+            formatted_response += (
+                f"{misc.name}: {misc.amount} {misc.unit or 'g'} - {misc.use} "
+                f"[Inventory ID: {inventory_id}{concentration}]"
+            )
             if misc.time is not None:
                 formatted_response += f" @ {misc.time} {'days' if misc.time_is_days else 'min'}"
             formatted_response += "\n"
@@ -122,7 +139,20 @@ Fermentables:
         sp = recipe.water.source
         formatted_response += f"Ca: {sp.calcium} Mg: {sp.magnesium} Na: {sp.sodium} "
         formatted_response += f"Cl: {sp.chloride} SO4: {sp.sulfate} HCO3: {sp.bicarbonate}\n"
-        
+
+        if recipe.water.dilution_percentage is not None:
+            formatted_response += (
+                f"Dilution: {recipe.water.dilution_percentage}% RO / "
+                f"{100 - recipe.water.dilution_percentage}% source water\n"
+            )
+        if recipe.water.dilution is not None:
+            formatted_response += f"Dilution Water: {recipe.water.dilution.name or 'N/A'}\n"
+        if recipe.water.mash_water_amount is not None or recipe.water.sparge_water_amount is not None:
+            formatted_response += (
+                f"Liquor: mash {recipe.water.mash_water_amount or 0}L, "
+                f"sparge {recipe.water.sparge_water_amount or 0}L\n"
+            )
+
         formatted_response += "\nTarget Profile (mg/L):\n"
         wp = recipe.water.total
         formatted_response += f"Ca: {wp.calcium} Mg: {wp.magnesium} Na: {wp.sodium} "

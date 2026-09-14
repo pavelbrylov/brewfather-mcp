@@ -102,6 +102,272 @@ async def test_http_error_handling_patch(
         await client.update_batch_detail(batch_id, {"status": "Failed"})
 
 
+@pytest.mark.asyncio
+async def test_create_recipe(client: BrewfatherClient, respx_mock: MockRouter):
+    recipe = {
+        "name": "Test IPA",
+        "type": "All Grain",
+        "batchSize": 25,
+        "fermentables": [],
+    }
+    respx_mock.post(f"{BASE_URL}/recipes").mock(
+        return_value=httpx.Response(201, json={"id": "new-recipe-id"})
+    )
+
+    result = await client.create_recipe(recipe)
+
+    assert result == {"id": "new-recipe-id"}
+    request = respx_mock.calls.last.request
+    assert request.method == "POST"
+    assert json.loads(request.content) == recipe
+
+
+@pytest.mark.asyncio
+async def test_create_recipe_resolves_complete_equipment_profile(
+    client: BrewfatherClient, respx_mock: MockRouter
+):
+    recipe = {
+        "name": "Equipment IPA",
+        "equipment": {"name": "Brewster Beacon 40L"},
+    }
+    respx_mock.get(f"{BASE_URL}/recipes").mock(
+        return_value=httpx.Response(200, json=[{
+            "_id": "profile-recipe", "name": "Reference Recipe",
+            "equipment": {"name": "Brewster Beacon 40L"},
+        }])
+    )
+    respx_mock.get(f"{BASE_URL}/recipes/profile-recipe").mock(
+        return_value=httpx.Response(200, json={
+            "_id": "profile-recipe", "name": "Reference Recipe",
+            "equipment": {
+                "name": "Brewster Beacon 40L",
+                "mashWaterFormula": "(GrainAmountKg * WaterGrainRatio) + MashTunDeadSpaceL",
+                "spargeWaterFormula": "BoilVolumeColdL - MashWaterL",
+                "mashTunDeadSpace": 7,
+            },
+        })
+    )
+    respx_mock.post(f"{BASE_URL}/recipes").mock(
+        return_value=httpx.Response(201, json={"id": "equipment-recipe-id"})
+    )
+
+    await client.create_recipe(recipe)
+
+    posted = json.loads(respx_mock.calls.last.request.content)
+    assert posted["equipment"]["mashWaterFormula"].startswith("(GrainAmountKg")
+    assert posted["equipment"]["mashTunDeadSpace"] == 7
+
+
+@pytest.mark.asyncio
+async def test_create_recipe_links_matching_inventory_items(
+    client: BrewfatherClient, respx_mock: MockRouter
+):
+    recipe = {
+        "name": "Linked IPA",
+        "fermentables": [{"name": "Pale Ale", "amount": 2.8, "type": "Grain"}],
+        "hops": [{"name": "Citra", "amount": 20, "use": "Boil", "time": 10}],
+    }
+    respx_mock.get(f"{BASE_URL}/inventory/fermentables").mock(
+        return_value=httpx.Response(200, json=[{"_id": "f1", "name": "Pale Ale", "type": "Grain"}])
+    )
+    respx_mock.get(f"{BASE_URL}/inventory/fermentables/f1").mock(
+        return_value=httpx.Response(200, json={"_id": "f1", "name": "Pale Ale", "type": "Grain", "color": 4.0} | version_mock)
+    )
+    respx_mock.get(f"{BASE_URL}/inventory/hops").mock(
+        return_value=httpx.Response(200, json=[{"_id": "h1", "name": "Citra", "type": "Pellet", "alpha": 12.7}])
+    )
+    respx_mock.post(f"{BASE_URL}/recipes").mock(
+        return_value=httpx.Response(201, json={"id": "linked-recipe-id"})
+    )
+
+    await client.create_recipe(recipe)
+
+    posted = json.loads(respx_mock.calls.last.request.content)
+    assert posted["fermentables"][0]["_id"] == "f1"
+    assert posted["hops"][0]["_id"] == "h1"
+    assert posted["hops"][0]["type"] == "Pellet"
+    assert posted["hops"][0]["alpha"] == 12.7
+    assert posted["fermentables"][0]["percentage"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_create_recipe_relinks_generic_ingredient_id(
+    client: BrewfatherClient, respx_mock: MockRouter
+):
+    recipe = {
+        "name": "Relinked IPA",
+        "fermentables": [{"_id": "generic-id", "name": "Pale Ale", "amount": 2.8}],
+    }
+    respx_mock.get(f"{BASE_URL}/inventory/fermentables").mock(
+        return_value=httpx.Response(200, json=[{"_id": "f1", "name": "Pale Ale", "type": "Grain"}])
+    )
+    respx_mock.get(f"{BASE_URL}/inventory/fermentables/f1").mock(
+        return_value=httpx.Response(200, json={"_id": "f1", "name": "Pale Ale", "type": "Grain", "color": 4.0} | version_mock)
+    )
+    respx_mock.post(f"{BASE_URL}/recipes").mock(
+        return_value=httpx.Response(201, json={"id": "relinked-recipe-id"})
+    )
+
+    await client.create_recipe(recipe)
+
+    posted = json.loads(respx_mock.calls.last.request.content)
+    assert posted["fermentables"][0]["_id"] == "f1"
+
+
+@pytest.mark.asyncio
+async def test_create_recipe_matches_fermentable_supplier(
+    client: BrewfatherClient, respx_mock: MockRouter
+):
+    recipe = {
+        "name": "Supplier IPA",
+        "fermentables": [{
+            "name": "Pale Ale", "supplier": "Weyermann", "amount": 2.8,
+        }],
+    }
+    respx_mock.get(f"{BASE_URL}/inventory/fermentables").mock(
+        return_value=httpx.Response(200, json=[
+            {"_id": "generic-pale", "name": "Pale Ale", "type": "Grain", "supplier": None},
+            {"_id": "weyermann-pale", "name": "Pale Ale", "type": "Grain", "supplier": "Weyermann"},
+        ])
+    )
+    respx_mock.get(f"{BASE_URL}/inventory/fermentables/weyermann-pale").mock(
+        return_value=httpx.Response(200, json={
+            "_id": "weyermann-pale", "name": "Pale Ale", "type": "Grain",
+            "supplier": "Weyermann", "color": 4.0,
+        } | version_mock)
+    )
+    respx_mock.post(f"{BASE_URL}/recipes").mock(
+        return_value=httpx.Response(201, json={"id": "supplier-recipe-id"})
+    )
+
+    await client.create_recipe(recipe)
+
+    posted = json.loads(respx_mock.calls.last.request.content)
+    assert posted["fermentables"][0]["_id"] == "weyermann-pale"
+    assert posted["fermentables"][0]["supplier"] == "Weyermann"
+
+
+@pytest.mark.asyncio
+async def test_create_recipe_hydrates_zero_color_from_fermentable_inventory(
+    client: BrewfatherClient, respx_mock: MockRouter
+):
+    recipe = {
+        "name": "Colorful IPA",
+        "fermentables": [{
+            "name": "BEST Pilsen", "amount": 2.8, "color": 0,
+        }],
+    }
+    respx_mock.get(f"{BASE_URL}/inventory/fermentables").mock(
+        return_value=httpx.Response(200, json=[
+            {"_id": "pilsen-1", "name": "BEST Pilsen", "type": "Grain", "supplier": "BESTMALZ"},
+        ])
+    )
+    respx_mock.get(f"{BASE_URL}/inventory/fermentables/pilsen-1").mock(
+        return_value=httpx.Response(200, json={
+            "_id": "pilsen-1", "name": "BEST Pilsen", "type": "Grain",
+            "supplier": "BESTMALZ", "color": 1.78, "potential": 1.035,
+        } | version_mock)
+    )
+    respx_mock.post(f"{BASE_URL}/recipes").mock(
+        return_value=httpx.Response(201, json={"id": "color-recipe-id"})
+    )
+
+    await client.create_recipe(recipe)
+
+    posted = json.loads(respx_mock.calls.last.request.content)
+    assert posted["fermentables"][0]["_id"] == "pilsen-1"
+    assert posted["fermentables"][0]["color"] == 1.78
+    assert posted["fermentables"][0]["potential"] == 1.035
+
+
+@pytest.mark.asyncio
+async def test_create_recipe_preserves_missing_inventory_fermentable(
+    client: BrewfatherClient, respx_mock: MockRouter
+):
+    recipe = {
+        "name": "Custom Malt IPA",
+        "fermentables": [{"name": "Experimental Malt", "amount": 0.5, "type": "Grain"}],
+    }
+    respx_mock.get(f"{BASE_URL}/inventory/fermentables").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx_mock.post(f"{BASE_URL}/recipes").mock(
+        return_value=httpx.Response(201, json={"id": "custom-recipe-id"})
+    )
+
+    await client.create_recipe(recipe)
+
+    posted = json.loads(respx_mock.calls.last.request.content)
+    assert posted["fermentables"][0] == {
+        "name": "Experimental Malt", "amount": 0.5, "type": "Grain", "percentage": 100.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_recipe_links_water_agent_unit_and_concentration(
+    client: BrewfatherClient, respx_mock: MockRouter
+):
+    recipe = {
+        "name": "Water Agent IPA",
+        "miscs": [{
+            "name": "Calcium Chloride (CaCl2)", "amount": 5.28,
+            "use": "Mash", "unit": "g", "concentration": 0,
+        }],
+    }
+    respx_mock.get(f"{BASE_URL}/inventory/miscs").mock(
+        return_value=httpx.Response(200, json=[{
+            "_id": "cacl2-1", "name": "Calcium Chloride (CaCl2)",
+            "type": "Water Agent",
+        }])
+    )
+    respx_mock.get(f"{BASE_URL}/inventory/miscs/cacl2-1").mock(
+        return_value=httpx.Response(200, json={
+            "_id": "cacl2-1", "name": "Calcium Chloride (CaCl2)",
+            "type": "Water Agent", "unit": "ml", "concentration": 36,
+            "waterAdjustment": True,
+        } | version_mock)
+    )
+    respx_mock.post(f"{BASE_URL}/recipes").mock(
+        return_value=httpx.Response(201, json={"id": "water-agent-recipe-id"})
+    )
+
+    await client.create_recipe(recipe)
+
+    posted = json.loads(respx_mock.calls.last.request.content)
+    misc = posted["miscs"][0]
+    assert misc["_id"] == "cacl2-1"
+    assert misc["unit"] == "ml"
+    assert misc["concentration"] == 36
+    assert misc["waterAdjustment"] is True
+
+
+@pytest.mark.asyncio
+async def test_update_recipe(client: BrewfatherClient, respx_mock: MockRouter):
+    recipe_id = "recipe-to-update"
+    update = {"name": "Updated IPA", "primaryTemp": 19}
+    respx_mock.patch(f"{BASE_URL}/recipes/{recipe_id}").mock(
+        return_value=httpx.Response(200, text="Updated")
+    )
+
+    await client.update_recipe(recipe_id, update)
+
+    request = respx_mock.calls.last.request
+    assert request.method == "PATCH"
+    assert json.loads(request.content) == update
+
+
+@pytest.mark.asyncio
+async def test_delete_recipe(client: BrewfatherClient, respx_mock: MockRouter):
+    recipe_id = "recipe-to-delete"
+    respx_mock.delete(f"{BASE_URL}/recipes/{recipe_id}").mock(
+        return_value=httpx.Response(200, text="Deleted")
+    )
+
+    await client.delete_recipe(recipe_id)
+
+    assert respx_mock.calls.last.request.method == "DELETE"
+
+
 class TestFermentables:
     @pytest.mark.asyncio
     async def test_get_fermentables_list(

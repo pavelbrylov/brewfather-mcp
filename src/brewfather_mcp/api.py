@@ -1,4 +1,6 @@
 from enum import StrEnum
+from typing import Any
+import json
 import logging
 import os
 import httpx
@@ -230,6 +232,152 @@ class BrewfatherClient:
         url = self._build_url("recipes", id=id)
         json_response = await self._make_request(url)
         return RecipeDetail.model_validate_json(json_response)
+
+    async def _resolve_equipment_profile(self, name: str) -> dict[str, Any] | None:
+        """Find a complete equipment profile from an existing recipe."""
+        query_params = ListQueryParams()
+        query_params.limit = 50
+        query_params.complete = True
+        recipes = await self.get_recipes_list(query_params)
+        wanted = self._recipe_name_key(name)
+        for recipe in recipes.root:
+            if not recipe.equipment or self._recipe_name_key(recipe.equipment.name) != wanted:
+                continue
+            raw = json.loads(await self._make_request(self._build_url("recipes", id=recipe.id)))
+            equipment = raw.get("equipment")
+            if isinstance(equipment, dict) and equipment.get("mashWaterFormula"):
+                return equipment
+        return None
+
+    async def _enrich_recipe_profile(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Enrich caller-friendly recipe input with Brewfather profile data."""
+        enriched_data = dict(data)
+        equipment = enriched_data.get("equipment")
+        if isinstance(equipment, dict):
+            name = equipment.get("name")
+            if name and not equipment.get("mashWaterFormula"):
+                resolved = await self._resolve_equipment_profile(name)
+                if resolved:
+                    enriched_data["equipment"] = resolved
+        return enriched_data
+
+    @staticmethod
+    def _recipe_name_key(name: Any) -> str:
+        return " ".join(str(name or "").casefold().split())
+
+    async def _link_recipe_inventory(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Attach inventory IDs to exact-name recipe ingredient matches."""
+        linked_data = await self._enrich_recipe_profile(data)
+        ingredient_sources = (
+            ("fermentables", self.get_fermentables_list),
+            ("hops", self.get_hops_list),
+            ("yeasts", self.get_yeasts_list),
+            ("miscs", self.get_miscs_list),
+        )
+
+        for field, getter in ingredient_sources:
+            ingredients = linked_data.get(field)
+            if not isinstance(ingredients, list) or not ingredients:
+                continue
+
+            if field == "fermentables":
+                total_amount = sum(
+                    ingredient.get("amount", 0)
+                    for ingredient in ingredients
+                    if isinstance(ingredient, dict)
+                    and isinstance(ingredient.get("amount"), (int, float))
+                )
+                if total_amount > 0:
+                    ingredients = [
+                        {
+                            **ingredient,
+                            "percentage": ingredient.get("percentage")
+                            if ingredient.get("percentage") is not None
+                            else round(ingredient.get("amount", 0) / total_amount * 100, 4),
+                        }
+                        if isinstance(ingredient, dict)
+                        else ingredient
+                        for ingredient in ingredients
+                    ]
+                    linked_data[field] = ingredients
+
+            inventory = await getter()
+            by_name: dict[str, list[Any]] = {}
+            for item in inventory.root:
+                if item.name:
+                    by_name.setdefault(self._recipe_name_key(item.name), []).append(item)
+            enriched = []
+            for ingredient in ingredients:
+                ingredient = dict(ingredient)
+                candidates = by_name.get(self._recipe_name_key(ingredient.get("name")), [])
+                requested_supplier = self._recipe_name_key(ingredient.get("supplier"))
+                if requested_supplier:
+                    match = next(
+                        (
+                            item for item in candidates
+                            if self._recipe_name_key(getattr(item, "supplier", None))
+                            == requested_supplier
+                        ),
+                        None,
+                    )
+                else:
+                    match = candidates[0] if candidates else None
+                if match:
+                    ingredient["_id"] = match.id
+                    ingredient["name"] = match.name
+                    ingredient["type"] = match.type
+                    match_supplier = getattr(match, "supplier", None)
+                    if match_supplier is not None:
+                        ingredient["supplier"] = match_supplier
+                    if field == "hops":
+                        ingredient.setdefault("alpha", match.alpha)
+                    elif field == "yeasts":
+                        ingredient.setdefault("attenuation", match.attenuation)
+                        if match.form:
+                            ingredient.setdefault("form", match.form)
+                    elif field == "miscs":
+                        detail = await self.get_misc_detail(match.id)
+                        detail_values = detail.model_dump(by_alias=True, exclude_none=True)
+                        for key in ("unit", "concentration", "amountPerL", "waterAdjustment"):
+                            value = detail_values.get(key)
+                            if value is not None:
+                                ingredient[key] = value
+                    elif field == "fermentables":
+                        # List responses omit technical values such as EBC/color.
+                        # Hydrate them when the caller supplied an existing/generic
+                        # ingredient or an explicit zero/empty color.
+                        if ingredient.get("color") in (None, 0, 0.0) or ingredient.get("potential") is None:
+                            detail = await self.get_fermentable_detail(match.id)
+                            detail_values = detail.model_dump(by_alias=True, exclude_none=True)
+                            for key in (
+                                "color", "potential", "potentialPercentage",
+                                "grainCategory", "attenuation", "origin",
+                            ):
+                                value = detail_values.get(key)
+                                if value is not None:
+                                    ingredient[key] = value
+                enriched.append(ingredient)
+            linked_data[field] = enriched
+
+        return linked_data
+
+    async def create_recipe(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a recipe and return Brewfather's generated recipe ID."""
+        url = self._build_url("recipes")
+        response = await self._make_post_request(url, await self._link_recipe_inventory(data))
+        return json.loads(response) if response else {}
+
+    async def update_recipe(self, id: str, data: dict[str, Any]) -> None:
+        """Update an existing recipe through Brewfather's API."""
+        url = self._build_url("recipes", id=id)
+        await self._make_patch_request(url, await self._link_recipe_inventory(data))
+
+    async def delete_recipe(self, id: str) -> None:
+        """Delete an existing recipe through Brewfather's API."""
+        url = self._build_url("recipes", id=id)
+        async with httpx.AsyncClient(auth=self.auth) as client:
+            response = await client.delete(url)
+            response.raise_for_status()
 
     # Add similar patterns for other inventory types (hops, yeasts, miscs)...
     async def get_hops_list(

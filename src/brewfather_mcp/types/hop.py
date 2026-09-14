@@ -156,6 +156,11 @@ class RecipeHop(HopBase):
         "populate_by_name": True,
     }
 
+    @field_validator("manufacturing_date", "best_before_date", mode="before")
+    @classmethod
+    def convert_timestamp_to_isodate(cls, value):
+        return utils.convert_timestamp_to_iso8601(value)
+
 
 class BatchHop(RecipeHop):
     """Hop addition in a batch context with batch-specific tracking fields"""

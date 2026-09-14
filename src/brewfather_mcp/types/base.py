@@ -1,5 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 from pydantic import BaseModel, RootModel, Field
 
 class Timestamp(BaseModel):
@@ -179,13 +180,21 @@ class WaterAdjustment(BaseModel):
 class WaterSettings(BaseModel):
     """Complete water profile and adjustment settings"""
     source: WaterProfile
+    dilution: WaterProfile | None = None
+    diluted: WaterProfile | None = None
     mash: WaterProfile
     sparge: WaterProfile
     total: WaterProfile
+    mash_water_amount: float | None = Field(alias="mashWaterAmount", default=None)
+    sparge_water_amount: float | None = Field(alias="spargeWaterAmount", default=None)
+    dilution_percentage: float | None = Field(alias="dilutionPercentage", default=None)
     mash_adjustments: WaterAdjustment = Field(alias="mashAdjustments")
     sparge_adjustments: WaterAdjustment = Field(alias="spargeAdjustments")
     total_adjustments: WaterAdjustment = Field(alias="totalAdjustments")
     enable_sparge_adjustments: bool = Field(alias="enableSpargeAdjustments")
+    enable_sparge_acid_adjustments: bool | None = Field(alias="enableSpargeAcidAdjustments", default=None)
+    enable_acid_adjustments: bool | None = Field(alias="enableAcidAdjustments", default=None)
+    settings: dict[str, Any] | None = None
     mash_ph: float = Field(alias="mashPh")
     acid_ph_adjustment: float = Field(alias="acidPhAdjustment")
     sparge_acid_ph_adjustment: float = Field(alias="spargeAcidPhAdjustment")
