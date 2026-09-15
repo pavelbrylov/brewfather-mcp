@@ -281,6 +281,68 @@ async def test_create_recipe_hydrates_zero_color_from_fermentable_inventory(
 
 
 @pytest.mark.asyncio
+async def test_create_recipe_expands_dilution_water_settings(
+    client: BrewfatherClient, respx_mock: MockRouter
+):
+    recipe = {
+        "name": "Diluted IPA",
+        "miscs": [{
+            "name": "Lactic Acid", "use": "Mash", "amount": 4.13,
+            "unit": "ml", "concentration": 80,
+        }],
+        "water": {
+            "sourceProfile": {
+                "_id": "tap-water", "name": "Tap", "type": "Source",
+                "calcium": 88.7, "magnesium": 4, "sodium": 22.6,
+                "chloride": 50, "sulfate": 30, "bicarbonate": 217,
+            },
+            "dilution": {"_id": "default-distilled", "name": "Distilled Water", "type": "Source"},
+            "dilutionPercentage": 75,
+            "mash": 31.3,
+            "sparge": 0,
+            "targetProfile": {
+                "calcium": 90, "magnesium": 1, "sodium": 5.65,
+                "chloride": 93.7, "sulfate": 60, "bicarbonate": 54.25,
+            },
+            "adjustments": {"calciumChloride": 5.28, "calciumSulfate": 2.95},
+            "mashPh": 5.35,
+            "acidPhAdjustment": 4.5,
+        },
+    }
+    respx_mock.get(f"{BASE_URL}/inventory/miscs").mock(
+        return_value=httpx.Response(200, json=[{
+            "_id": "lactic-1", "name": "Lactic Acid", "type": "Water Agent",
+        }])
+    )
+    respx_mock.get(f"{BASE_URL}/inventory/miscs/lactic-1").mock(
+        return_value=httpx.Response(200, json={
+            "_id": "lactic-1", "name": "Lactic Acid", "type": "Water Agent",
+            "unit": "ml", "concentration": 80, "waterAdjustment": True,
+        } | version_mock)
+    )
+    respx_mock.post(f"{BASE_URL}/recipes").mock(
+        return_value=httpx.Response(201, json={"id": "diluted-recipe-id"})
+    )
+
+    await client.create_recipe(recipe)
+
+    water = json.loads(respx_mock.calls.last.request.content)["water"]
+    assert water["source"]["type"] == "source"
+    assert water["dilution"]["type"] == "source"
+    assert water["dilutionPercentage"] == 75
+    assert water["dilutionAmount"] == pytest.approx(23.475)
+    assert water["mashWaterAmount"] == 31.3
+    assert water["spargeWaterAmount"] == 0
+    assert water["diluted"]["calcium"] == pytest.approx(22.175)
+    assert water["total"]["chloride"] == 93.7
+    assert water["mashAdjustments"]["calciumChloride"] == 5.28
+    assert water["mashAdjustments"]["acids"] == [{
+        "type": "lactic", "amount": 4.13, "concentration": 80, "unit": "ml",
+    }]
+    assert water["enableSpargeAdjustments"] is False
+
+
+@pytest.mark.asyncio
 async def test_create_recipe_preserves_missing_inventory_fermentable(
     client: BrewfatherClient, respx_mock: MockRouter
 ):

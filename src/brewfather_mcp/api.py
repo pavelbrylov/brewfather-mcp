@@ -100,12 +100,32 @@ class BrewfatherClient:
     async def _make_patch_request(self, url: str, data: dict) -> None:
         async with httpx.AsyncClient(auth=self.auth) as client:
             response = await client.patch(url, json=data)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                detail = response.text.strip()
+                if detail:
+                    raise httpx.HTTPStatusError(
+                        f"{exc} Response body: {detail}",
+                        request=exc.request,
+                        response=exc.response,
+                    ) from exc
+                raise
 
     async def _make_post_request(self, url: str, data: dict) -> str:
         async with httpx.AsyncClient(auth=self.auth) as client:
             response = await client.post(url, json=data)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                detail = response.text.strip()
+                if detail:
+                    raise httpx.HTTPStatusError(
+                        f"{exc} Response body: {detail}",
+                        request=exc.request,
+                        response=exc.response,
+                    ) from exc
+                raise
             return response.text
 
     def _build_url(
@@ -249,6 +269,141 @@ class BrewfatherClient:
                 return equipment
         return None
 
+    @staticmethod
+    def _normalise_water_settings(
+        water: dict[str, Any], miscs: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Expand concise water input into Brewfather's complete water object.
+
+        The recipe API does not calculate missing water fields.  In particular,
+        sending only ``source``, ``dilution`` and ``dilutionPercentage`` saves a
+        recipe for which the UI cannot select or calculate dilution.  Accept the
+        ergonomic input used by MCP callers and emit the state Brewfather stores
+        after selecting a dilution in its UI.
+        """
+        result = dict(water)
+
+        source = result.get("sourceProfile", result.get("source"))
+        dilution = result.get("dilution")
+        if not isinstance(source, dict) or not isinstance(dilution, dict):
+            return result
+
+        minerals = (
+            "calcium", "magnesium", "sodium", "chloride", "sulfate",
+            "bicarbonate",
+        )
+
+        def profile(value: dict[str, Any] | None, *, name: str, kind: str,
+                    defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+            item = dict(value or {})
+            item.pop("volume", None)
+            item["name"] = item.get("name", name)
+            item["type"] = str(item.get("type", kind)).lower()
+            if item["type"] not in {"source", "target"}:
+                item["type"] = kind
+            for mineral in minerals:
+                item.setdefault(mineral, (defaults or {}).get(mineral, 0))
+            return item
+
+        source = profile(source, name="Source Water", kind="source")
+        dilution = profile(dilution, name="Distilled Water", kind="source")
+        dilution_percentage = float(result.get("dilutionPercentage", 0))
+        source_fraction = max(0, min(100, 100 - dilution_percentage)) / 100
+        diluted = {
+            mineral: source[mineral] * source_fraction
+            + dilution[mineral] * (1 - source_fraction)
+            for mineral in minerals
+        }
+
+        target_input = result.get("targetProfile")
+        target = profile(
+            target_input if isinstance(target_input, dict) else result.get("total"),
+            name="Total Water", kind="target", defaults=diluted,
+        )
+
+        def water_amount(key: str, fallback: float) -> float:
+            value = result.get(key)
+            if isinstance(value, (int, float)):
+                return float(value)
+            return fallback
+
+        mash_amount = water_amount(
+            "mashWaterAmount",
+            water_amount("mash", water_amount("total", 0)),
+        )
+        sparge_amount = water_amount("spargeWaterAmount", water_amount("sparge", 0))
+        total_amount = mash_amount + sparge_amount
+
+        adjustments_input = result.get("adjustments", {})
+        mash_adjustments_input = result.get("mashAdjustments", adjustments_input)
+        total_adjustments_input = result.get("totalAdjustments", adjustments_input)
+
+        acid = result.get("acid")
+        if not isinstance(acid, dict):
+            for misc in miscs or []:
+                if (
+                    isinstance(misc, dict)
+                    and BrewfatherClient._recipe_name_key(misc.get("name")) == "lactic acid"
+                    and BrewfatherClient._recipe_name_key(misc.get("use")) == "mash"
+                ):
+                    acid = {
+                        "type": "lactic",
+                        "amount": misc.get("amount", 0),
+                        "concentration": misc.get("concentration", 80),
+                        "unit": misc.get("unit", "ml"),
+                    }
+                    break
+
+        def adjustments(value: Any, volume: float) -> dict[str, Any]:
+            adjustment = dict(value) if isinstance(value, dict) else {}
+            adjustment["volume"] = volume
+            for mineral in minerals:
+                adjustment.setdefault(mineral, 0)
+            return adjustment
+
+        mash_adjustments = adjustments(mash_adjustments_input, mash_amount)
+        total_adjustments = adjustments(total_adjustments_input, total_amount)
+        if isinstance(acid, dict):
+            acid_adjustment = {
+                "type": acid.get("type", "lactic"),
+                "amount": acid.get("amount", 0),
+                "concentration": acid.get("concentration", 80),
+                "unit": acid.get("unit", "ml"),
+            }
+            mash_adjustments["acids"] = [acid_adjustment]
+            total_adjustments["acids"] = [acid_adjustment]
+
+        result = {
+            key: value for key, value in result.items()
+            if key not in {"sourceProfile", "targetProfile", "adjustments"}
+        }
+        result.update({
+            "source": source,
+            "dilution": dilution,
+            "diluted": profile(diluted, name="Diluted Water", kind="target"),
+            "mash": profile(result.get("mash") if isinstance(result.get("mash"), dict) else target,
+                            name="Mash Water", kind="target", defaults=target),
+            "sparge": profile(result.get("sparge") if isinstance(result.get("sparge"), dict) else target,
+                              name="Sparge Water", kind="target", defaults=target),
+            "total": profile(result.get("total") if isinstance(result.get("total"), dict) else target,
+                             name="Total Water", kind="target", defaults=target),
+            "mashWaterAmount": mash_amount,
+            "spargeWaterAmount": sparge_amount,
+            "dilutionPercentage": dilution_percentage,
+            "dilutionAmount": total_amount * dilution_percentage / 100,
+            "mashAdjustments": mash_adjustments,
+            "spargeAdjustments": adjustments(result.get("spargeAdjustments"), sparge_amount),
+            "totalAdjustments": total_adjustments,
+            "enableSpargeAdjustments": result.get("enableSpargeAdjustments", sparge_amount > 0),
+            "enableSpargeAcidAdjustments": result.get("enableSpargeAcidAdjustments", sparge_amount > 0),
+            "enableAcidAdjustments": result.get("enableAcidAdjustments", True),
+            "mashPh": result.get("mashPh", 5.4),
+            "acidPhAdjustment": result.get("acidPhAdjustment", 0),
+            "spargeAcidPhAdjustment": result.get("spargeAcidPhAdjustment", 5.4),
+            "meta": {**result.get("meta", {}), "equalSourceTotal": False},
+        })
+        return result
+
     async def _enrich_recipe_profile(self, data: dict[str, Any]) -> dict[str, Any]:
         """Enrich caller-friendly recipe input with Brewfather profile data."""
         enriched_data = dict(data)
@@ -259,6 +414,12 @@ class BrewfatherClient:
                 resolved = await self._resolve_equipment_profile(name)
                 if resolved:
                     enriched_data["equipment"] = resolved
+        water = enriched_data.get("water")
+        if isinstance(water, dict):
+            miscs = enriched_data.get("miscs")
+            enriched_data["water"] = self._normalise_water_settings(
+                water, miscs if isinstance(miscs, list) else None,
+            )
         return enriched_data
 
     @staticmethod
